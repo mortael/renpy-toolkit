@@ -20,6 +20,7 @@ import { isPersistentSave, refreshSaveEntries } from './saves.js';
 import { initPyodide, pyDecompileRpyc } from './pyodide-runtime.js';
 import { recordRecentSession } from './recent-sessions.js';
 import { renderAll } from './main.js';
+import { pickDefaultAssetFolder } from './asset-browser.js';
 import { openModal, closeModal } from './modal.js';
 import { escapeHtml } from './utils.js';
 
@@ -101,17 +102,47 @@ export function updateMediaStatus() {
   el.textContent = store.fileIndex ? ('🖼 ' + store.fileIndex.length + ' files indexed') : '';
 }
 
+function resetAssetBrowserUiForLoad() {
+  store.mode = 'assets';
+  store.searchTerm = '';
+  const searchEl = document.getElementById('search');
+  if (searchEl) searchEl.value = '';
+  store.assetSelectedPaths.clear();
+  store.selectedId = null;
+}
+
+function selectDefaultAssetFolder() {
+  const folder = pickDefaultAssetFolder();
+  if (folder == null) return;
+  store.selectedId = folder;
+  if (folder) {
+    const parts = folder.split('/');
+    let acc = '';
+    parts.forEach(p => {
+      acc = acc ? acc + '/' + p : p;
+      store.assetExpandedFolders.add(acc);
+    });
+  }
+}
+
 export async function loadFolder(fileList) {
+  const files = [...fileList];
+  if (!files.length) {
+    showToast('No files selected — pick the folder again (browser did not return any files).', true);
+    return;
+  }
+
+  resetAssetBrowserUiForLoad();
   clearAssetUrlCache();
-  const newEntries = buildFileIndex(fileList);
+  const priorCount = store.fileIndex?.length ?? 0;
+  const newEntries = buildFileIndex(files);
   mergeFileIndex(newEntries);
 
-  const rpaFiles = store.fileIndex.filter(e =>
-    e.source === 'disk' && /\.(rpa|rpi)$/i.test(e.relPath)
-  );
-
-  store.loadedRpaArchives = [];
-  store.rpaLoadFailures = [];
+  const rpaFiles = newEntries.filter(e => {
+    if (e.source !== 'disk' || !/\.(rpa|rpi)$/i.test(e.relPath)) return false;
+    const name = e.relPath.split(/[\\/]/).pop();
+    return !store.loadedRpaArchives.some(a => a.name === name);
+  });
 
   if (rpaFiles.length) {
     setLoading(true);
@@ -152,9 +183,15 @@ export async function loadFolder(fileList) {
     rpycCount: store.fileIndex.filter(e => /\.rpyc$/i.test(e.relPath) && !e.relPath.replace(/\\/g, '/').includes('/renpy/')).length,
   });
 
-  showToast('Game folder loaded: ' + store.fileIndex.length + ' files indexed in total');
+  const added = store.fileIndex.length - priorCount;
+  showToast(
+    priorCount > 0
+      ? `Added ${added} file(s) — ${store.fileIndex.length} indexed in total`
+      : `Game folder loaded: ${store.fileIndex.length} files indexed`,
+  );
   updateMeta();
   updateMediaStatus();
+  selectDefaultAssetFolder();
 
   await tryParseStoryFromIndex();
 
@@ -182,16 +219,21 @@ export async function loadArchives(fileList) {
     return;
   }
 
+  resetAssetBrowserUiForLoad();
   const newEntries = files.map(f => ({ relPath: f.name, file: f, source: 'disk' }));
   mergeFileIndex(newEntries);
   const failuresBefore = store.rpaLoadFailures.length;
+  const rpaToParse = newEntries.filter(e => {
+    const name = e.relPath.split(/[\\/]/).pop();
+    return !store.loadedRpaArchives.some(a => a.name === name);
+  });
 
   setLoading(true);
   try {
-    for (let i = 0; i < newEntries.length; i++) {
-      const entry = newEntries[i];
+    for (let i = 0; i < rpaToParse.length; i++) {
+      const entry = rpaToParse[i];
       const archiveName = entry.relPath.split(/[\\/]/).pop();
-      setLoading(true, `Parsing archive ${i + 1}/${newEntries.length}: ${archiveName}`);
+      setLoading(true, `Parsing archive ${i + 1}/${rpaToParse.length}: ${archiveName}`);
       try {
         await indexRpaEntry(entry);
       } catch (err) {
@@ -230,14 +272,7 @@ export async function loadArchives(fileList) {
   updateMeta();
   updateMediaStatus();
   await tryParseStoryFromIndex();
-  store.mode = 'assets';
-  if (!store.selectedId && store.fileIndex?.length) {
-    const first = store.fileIndex[0];
-    if (first) {
-      const folder = first.relPath.replace(/\\/g, '/').split('/').slice(0, -1).join('/') || '(root)';
-      store.selectedId = folder;
-    }
-  }
+  selectDefaultAssetFolder();
   renderAll();
 }
 

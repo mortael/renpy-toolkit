@@ -112,9 +112,50 @@ function subtreeMatchesSearch(node, term) {
 }
 
 function expandAncestorsOf(path) {
+  if (!path) return;
   const parts = String(path).split('/');
   let acc = '';
   parts.forEach(p => { acc = acc ? acc + '/' + p : p; store.assetExpandedFolders.add(acc); });
+}
+
+function mediaCountInEntries(entries) {
+  return entries.filter(e => getAssetKind(e.relPath.split(/[\\/]/).pop().toLowerCase()) !== 'other').length;
+}
+
+/** Pick a sensible default folder after loading files (prefers images/ with media). */
+export function pickDefaultAssetFolder() {
+  const tree = buildFolderTree();
+  const candidates = [];
+
+  function consider(node) {
+    const files = collectAllFiles(node);
+    if (!files.length) return;
+    candidates.push({
+      path: node.path,
+      media: mediaCountInEntries(files),
+      total: files.length,
+      imagesHint: /(^|\/)images(\/|$)/i.test(node.path),
+    });
+  }
+
+  if (tree.directFiles.length) consider(tree);
+  function walk(node) {
+    Object.values(node.children).forEach(child => {
+      consider(child);
+      walk(child);
+    });
+  }
+  walk(tree);
+
+  if (!candidates.length) return null;
+
+  const byImages = candidates.filter(c => c.imagesHint && c.media > 0).sort((a, b) => b.media - a.media);
+  if (byImages.length) return byImages[0].path;
+
+  const byMedia = candidates.filter(c => c.media > 0).sort((a, b) => b.media - a.media);
+  if (byMedia.length) return byMedia[0].path;
+
+  return candidates.sort((a, b) => b.total - a.total)[0].path;
 }
 
 function renderArchiveListPanel(sb) {
@@ -174,7 +215,8 @@ export function renderAssetBrowserSidebar() {
   renderArchiveListPanel(sb);
 
   const tree = buildFolderTree();
-  if (Object.keys(tree.children).length === 0) {
+  const hasTreeFiles = Object.keys(tree.children).length > 0 || tree.directFiles.length > 0;
+  if (!hasTreeFiles) {
     const empty = document.createElement('div');
     empty.style.cssText = 'padding:14px 18px;font-size:12px;color:var(--text-dim)';
     empty.textContent = archivesOrFailuresNote()
@@ -192,14 +234,86 @@ export function renderAssetBrowserSidebar() {
   }
 
   const term = store.searchTerm ? store.searchTerm.toLowerCase() : '';
+  const rowsBefore = sb.childElementCount;
   renderTreeLevel(tree, sb, 0, term);
+  if (term && sb.childElementCount === rowsBefore) {
+    const hint = document.createElement('div');
+    hint.style.cssText = 'padding:10px 18px;font-size:12px;color:var(--text-dim)';
+    hint.textContent = 'No folders match the search filter — clear the search box above.';
+    sb.appendChild(hint);
+  }
 }
 
 function archivesOrFailuresNote() {
   return (store.loadedRpaArchives?.length || 0) + (store.rpaLoadFailures?.length || 0) > 0;
 }
 
+function renderAssetFolderRow(folderNode, displayName, container, depth, term) {
+  const hasSubfolders = Object.keys(folderNode.children).length > 0;
+  const hasFiles = folderNode.directFiles.length > 0;
+  if (!hasSubfolders && !hasFiles) return;
+  if (term && !subtreeMatchesSearch(folderNode, term)) return;
+
+  const folderPath = folderNode.path;
+  const totalCount = collectAllFiles(folderNode).length;
+  const expanded = store.assetExpandedFolders.has(folderPath);
+  const hasChildren = hasSubfolders;
+
+  const row = document.createElement('div');
+  row.className = 'tree-row' + (hasChildren ? '' : ' tree-row-leaf');
+  row.style.paddingLeft = (10 + depth * 16) + 'px';
+  row.classList.toggle('active', store.selectedId === folderPath);
+
+  const arrow = document.createElement('span');
+  arrow.className = hasChildren ? 'tree-arrow' : 'tree-arrow-spacer';
+  if (hasChildren) {
+    arrow.textContent = expanded ? '▼' : '▶';
+    arrow.onclick = (e) => {
+      e.stopPropagation();
+      if (expanded) store.assetExpandedFolders.delete(folderPath);
+      else store.assetExpandedFolders.add(folderPath);
+      renderAssetBrowserSidebar();
+    };
+  }
+
+  const counts = {};
+  collectAllFiles(folderNode).forEach(e => {
+    const k = getAssetKind(e.relPath.split(/[\\/]/).pop().toLowerCase());
+    counts[k] = (counts[k] || 0) + 1;
+  });
+  const kindSummary = Object.keys(counts).map(k => kindIcon(k)).join('');
+
+  const label = document.createElement('span');
+  label.className = 'tree-label';
+  label.innerHTML = kindSummary + ' ' + escapeHtml(displayName);
+  const count = document.createElement('span');
+  count.className = 'ct';
+  count.textContent = totalCount;
+
+  row.appendChild(arrow);
+  row.appendChild(label);
+  row.appendChild(count);
+  row.onclick = () => {
+    store.selectedId = folderPath;
+    store.assetBrowserPageSize = 60;
+    store.assetSelectedPaths.clear();
+    assetSelectionAnchor = null;
+    if (hasChildren) store.assetExpandedFolders.add(folderPath);
+    expandAncestorsOf(folderPath);
+    renderAssetBrowserSidebar();
+    renderAssetBrowserContent();
+  };
+  container.appendChild(row);
+
+  if (hasChildren && expanded) {
+    renderTreeLevel(folderNode, container, depth + 1, term);
+  }
+}
+
 function renderTreeLevel(node, container, depth, term) {
+  if (depth === 0 && node.directFiles.length > 0) {
+    renderAssetFolderRow(node, '(root)', container, depth, term);
+  }
   Object.keys(node.children).sort().forEach(key => {
     const child = node.children[key];
     if (term && !subtreeMatchesSearch(child, term)) return;
@@ -275,7 +389,7 @@ export function renderAssetBrowserContent() {
   const entries = node ? collectAllFiles(node) : [];
   const title = document.createElement('div');
   title.className = 'cat-title';
-  title.textContent = store.selectedId + ' (' + entries.length + ' files)';
+  title.textContent = (store.selectedId || '(root)') + ' (' + entries.length + ' files)';
   content.appendChild(title);
 
   let filtered = entries;
