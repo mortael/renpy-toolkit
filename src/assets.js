@@ -123,7 +123,8 @@ export function clearAssetUrlCache() {
 
 /** Extract every file from a parsed RPA archive (not only media). */
 export async function downloadRpaArchiveAsZip(archive) {
-  if (!archive?.index || !archive.archiveBytes) {
+  const source = archive?.archiveFile || archive?.archiveBytes;
+  if (!archive?.index || !source) {
     showToast('Archive data not available for extract', true);
     return;
   }
@@ -143,7 +144,7 @@ export async function downloadRpaArchiveAsZip(archive) {
         setLoading(true, `Extracting ${i + 1}/${paths.length}…`);
       }
       try {
-        const bytes = readRpaFile(path, archive.index[path], archive.archiveBytes, archive.zixMeta);
+        const bytes = await readRpaFile(path, archive.index[path], source, archive.zixMeta);
         zip.file(path.replace(/\\/g, '/'), bytes);
       } catch (err) {
         failCount++;

@@ -364,6 +364,133 @@ function tryParseAttempts(bytes, attempts) {
   throw lastErr || new Error('No parse attempts available');
 }
 
+const HEADER_READ_BYTES = 65536;
+
+/** Read only the first chunk of a File — safe for multi-GB archives. */
+export async function readHeaderFromFile(file) {
+  const end = Math.min(file.size, HEADER_READ_BYTES);
+  const buf = await file.slice(0, end).arrayBuffer();
+  return readHeaderLine(new Uint8Array(buf));
+}
+
+async function loadParsedIndexFromFile(file, attempt) {
+  const buf = await file.slice(attempt.offset).arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  return loadParsedIndex(bytes, { ...attempt, offset: 0 });
+}
+
+async function tryParseAttemptsFromFile(file, attempts) {
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      const index = await loadParsedIndexFromFile(file, attempt);
+      return {
+        version: attempt.version,
+        index,
+        zixMeta: attempt.zixMeta || null,
+      };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('No parse attempts available');
+}
+
+/**
+ * Parse an RPA archive from a File without loading the entire file into RAM.
+ * Keeps a File handle for lazy per-entry reads via readRpaFile().
+ */
+export async function parseRpaArchiveFromFile(file, filename = 'archive.rpa', options = {}) {
+  if (!file?.slice) throw new Error('parseRpaArchiveFromFile needs a browser File');
+
+  if (options.manual) {
+    const { offset, key, version = 'manual' } = options.manual;
+    const index = await loadParsedIndexFromFile(file, { offset, key, indexFormat: 'pickle' });
+    return { version, index, zixMeta: options.zixMeta || null, archiveFile: file };
+  }
+
+  const ext = filename.toLowerCase().endsWith('.rpi') ? '.rpi' : '.rpa';
+  if (ext === '.rpi') {
+    const buf = await file.arrayBuffer();
+    const parsed = parseRpaArchive(buf, filename, options);
+    return { ...parsed, archiveFile: file };
+  }
+
+  const headerLine = await readHeaderFromFile(file);
+  let primaryHeader;
+  try {
+    primaryHeader = parseHeader(headerLine, ext);
+  } catch (err) {
+    if (err instanceof RpaParseError) {
+      err.filename = filename;
+      throw err;
+    }
+    throw new RpaParseError(err.message, { headerLine, filename, needsManual: true });
+  }
+
+  if (!Number.isFinite(primaryHeader.offset)) {
+    throw new RpaParseError(`Invalid index offset in header: ${headerLine.slice(0, 60)}`, {
+      headerLine,
+      filename,
+      needsManual: true,
+    });
+  }
+
+  const attempts = collectLoadAttempts(headerLine, primaryHeader, {
+    zixKey: options.zixKey ?? null,
+    zixRunAmount: options.zixRunAmount ?? null,
+  });
+
+  try {
+    const parsed = await tryParseAttemptsFromFile(file, attempts);
+    return { ...parsed, archiveFile: file };
+  } catch (err) {
+    throw new RpaParseError(
+      `Failed to read RPA index (${attempts.length} attempt(s)): ${err.message}`,
+      { headerLine, filename, needsManual: true },
+    );
+  }
+}
+
+/** File-based parse with ZiX metadata scan from loaded game scripts. */
+export async function parseRpaArchiveAsyncFromFile(file, filename = 'archive.rpa', options = {}) {
+  let firstErr;
+  try {
+    return await parseRpaArchiveFromFile(file, filename, options);
+  } catch (err) {
+    firstErr = err;
+    if (!(err instanceof RpaParseError) || !err.needsManual) throw err;
+    if (options.manual) throw err;
+  }
+
+  const zixMeta = await findZixMetadata(options.fileIndex);
+  if (!zixMeta) throw firstErr;
+
+  try {
+    const parsed = await parseRpaArchiveFromFile(file, filename, {
+      zixKey: zixMeta.key,
+      zixRunAmount: zixMeta.runAmount,
+    });
+    if (parsed.zixMeta) {
+      parsed.zixMeta.key = zixMeta.key;
+      parsed.zixMeta.runAmount = zixMeta.runAmount;
+    } else if (zixMeta.runAmount != null) {
+      parsed.zixMeta = {
+        variant: 'ZiX-12B',
+        key: zixMeta.key,
+        runAmount: zixMeta.runAmount,
+      };
+    }
+    return parsed;
+  } catch (retryErr) {
+    if (retryErr instanceof RpaParseError) {
+      retryErr.filename = filename;
+      throw retryErr;
+    }
+    throw firstErr;
+  }
+}
+
 /**
  * Parse an RPA archive from raw bytes.
  * @param {ArrayBuffer} arrayBuffer
@@ -466,12 +593,7 @@ export async function parseRpaArchiveAsync(arrayBuffer, filename = 'archive.rpa'
   }
 }
 
-export function readRpaFile(path, parts, archiveBytes, zixMeta = null) {
-  const part = parts[0];
-  const [offset, length, prefix] = part;
-  const prefixBytes = prefix instanceof Uint8Array ? prefix : new Uint8Array(prefix || []);
-  const dataLen = length - prefixBytes.length;
-  const body = archiveBytes.slice(offset, offset + dataLen);
+function assembleRpaPart(body, prefixBytes, zixMeta) {
   let out;
   if (prefixBytes.length === 0) {
     out = body;
@@ -480,12 +602,35 @@ export function readRpaFile(path, parts, archiveBytes, zixMeta = null) {
     out.set(prefixBytes, 0);
     out.set(body, prefixBytes.length);
   }
-
   if (zixMeta?.variant === 'ZiX-12B' && zixMeta.key != null && zixMeta.runAmount > 0) {
     return decodeZix12bPrefix(out, zixMeta.key, zixMeta.runAmount);
   }
-
   return out;
+}
+
+/** @param {Uint8Array|File|{ archiveFile?: File, archiveBytes?: Uint8Array }} source */
+export async function readRpaFile(path, parts, source, zixMeta = null) {
+  const part = parts[0];
+  const [offset, length, prefix] = part;
+  const prefixBytes = prefix instanceof Uint8Array ? prefix : new Uint8Array(prefix || []);
+  const dataLen = length - prefixBytes.length;
+
+  let body;
+  if (source instanceof Uint8Array) {
+    body = source.slice(offset, offset + dataLen);
+  } else if (source instanceof File || (source && typeof source.slice === 'function' && typeof source.size === 'number')) {
+    const buf = await source.slice(offset, offset + dataLen).arrayBuffer();
+    body = new Uint8Array(buf);
+  } else if (source?.archiveBytes instanceof Uint8Array) {
+    body = source.archiveBytes.slice(offset, offset + dataLen);
+  } else if (source?.archiveFile) {
+    const buf = await source.archiveFile.slice(offset, offset + dataLen).arrayBuffer();
+    body = new Uint8Array(buf);
+  } else {
+    throw new Error('No archive data source for ' + path);
+  }
+
+  return assembleRpaPart(body, prefixBytes, zixMeta);
 }
 
 export function listMediaFromIndex(index) {
@@ -561,6 +706,23 @@ export function parseRpa10Pair(indexArrayBuffer, dataArrayBuffer) {
     version: 'RPA-1.0',
     index: normalizeIndex(rawIndex),
     dataBytes: new Uint8Array(dataArrayBuffer),
+    zixMeta: null,
+  };
+}
+
+/** RPA-1.0 pair — reads small .rpi fully, keeps large .rpa as File for lazy reads. */
+export async function parseRpa10PairFromFiles(indexFile, dataFile) {
+  const indexBuf = await indexFile.arrayBuffer();
+  const indexBytes = new Uint8Array(indexBuf);
+  if (!isZlibAtStart(indexBytes)) {
+    throw new RpaParseError('RPA-1.0 index (.rpi) is not zlib-compressed', { needsManual: true });
+  }
+  const decompressed = inflate(indexBytes);
+  const rawIndex = unpickleIndex(decompressed);
+  return {
+    version: 'RPA-1.0',
+    index: normalizeIndex(rawIndex),
+    archiveFile: dataFile,
     zixMeta: null,
   };
 }

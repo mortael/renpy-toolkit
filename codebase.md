@@ -173,6 +173,8 @@ Ren'Py RPA-3.0 stores a pickled dict mapping filename → list of `(offset, leng
 
 **Fixed:** `readSignedLong` uses `bytes[i] * Math.pow(2, 8*i)` instead of `<<` (JS shifts are mod 32, corrupting large offsets).
 
+**Large archives (multi-GB):** `parseRpaArchiveFromFile()` reads only the header + index tail via `File.slice()`; individual assets load on demand through `readRpaFile()` — never `file.arrayBuffer()` on the whole `.rpa`.
+
 Run `npm test` for RPA + image-tag alias smoke tests.
 
 ## 9. Pyodide runtime (`pyodide-runtime.js`)

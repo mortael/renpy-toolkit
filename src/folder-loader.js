@@ -2,16 +2,16 @@ import { store } from './state.js';
 import { showToast, setLoading } from './utils.js';
 import { buildFileIndex, clearAssetUrlCache, getAssetKind } from './assets.js';
 import {
-  parseRpaArchive,
-  parseRpaArchiveAsync,
+  parseRpaArchiveFromFile,
+  parseRpaArchiveAsyncFromFile,
+  parseRpa10PairFromFiles,
+  readHeaderFromFile,
   readRpaFile,
   listMediaFromIndex,
   listAllPathsFromIndex,
   RpaParseError,
   findRpa10Pair,
-  parseRpa10Pair,
   isKnownRpaHeader,
-  readHeaderLine,
 } from './rpa.js';
 import { openRpaManualModal } from './modal.js';
 import { parseGameDataFromFolder } from './script-parser.js';
@@ -124,9 +124,7 @@ export async function loadFolder(fileList) {
           await indexRpaEntry(entry);
         } catch (err) {
           const archiveName = entry.relPath.split(/[\\/]/).pop();
-          const headerLine = entry.file
-            ? readHeaderLine(new Uint8Array(await entry.file.arrayBuffer()))
-            : '';
+          const headerLine = entry.file ? await readHeaderFromFile(entry.file).catch(() => '') : '';
           recordRpaFailure(entry, headerLine, err.message, archiveName);
           console.error('RPA index failed:', entry.relPath, err);
         }
@@ -197,9 +195,7 @@ export async function loadArchives(fileList) {
       try {
         await indexRpaEntry(entry);
       } catch (err) {
-        const headerLine = entry.file
-          ? readHeaderLine(new Uint8Array(await entry.file.arrayBuffer()))
-          : '';
+        const headerLine = entry.file ? await readHeaderFromFile(entry.file).catch(() => '') : '';
         recordRpaFailure(entry, headerLine, err.message, archiveName);
         console.error('RPA index failed:', entry.relPath, err);
       }
@@ -276,6 +272,11 @@ export function showSaveSelectionModal(entries) {
 async function indexRpaEntry(entry) {
   const rel = entry.relPath.replace(/\\/g, '/');
   const archiveName = entry.relPath.split(/[\\/]/).pop();
+  const file = entry.file;
+  if (!file) {
+    recordRpaFailure(entry, '', 'Missing file handle', archiveName);
+    return;
+  }
 
   // RPA-1.0 index sidecar — handled together with the .rpa data file.
   if (/\.rpi$/i.test(rel)) {
@@ -286,29 +287,26 @@ async function indexRpaEntry(entry) {
     }
   }
 
-  const buf = await entry.file.arrayBuffer();
-  const headerLine = readHeaderLine(new Uint8Array(buf));
+  const headerLine = await readHeaderFromFile(file);
   const pair = findRpa10Pair(entry, store.fileIndex);
 
   let parsed;
-  let dataBuf = buf;
   let displayName = archiveName;
+  let archiveFile = file;
 
   if (pair && !isKnownRpaHeader(headerLine)) {
-    const indexBuf = await pair.indexEntry.file.arrayBuffer();
-    dataBuf = pair.dataEntry === entry ? buf : await pair.dataEntry.file.arrayBuffer();
-    parsed = parseRpa10Pair(indexBuf, dataBuf);
+    parsed = await parseRpa10PairFromFiles(pair.indexEntry.file, pair.dataEntry.file);
     displayName = pair.baseName + '.rpa';
+    archiveFile = pair.dataEntry.file;
   } else {
     try {
-      parsed = await parseRpaArchiveAsync(buf, archiveName, { fileIndex: store.fileIndex });
+      parsed = await parseRpaArchiveAsyncFromFile(file, archiveName, { fileIndex: store.fileIndex });
     } catch (err) {
       if (pair && err instanceof RpaParseError) {
         try {
-          const indexBuf = await pair.indexEntry.file.arrayBuffer();
-          dataBuf = pair.dataEntry === entry ? buf : await pair.dataEntry.file.arrayBuffer();
-          parsed = parseRpa10Pair(indexBuf, dataBuf);
+          parsed = await parseRpa10PairFromFiles(pair.indexEntry.file, pair.dataEntry.file);
           displayName = pair.baseName + '.rpa';
+          archiveFile = pair.dataEntry.file;
         } catch {
           /* fall through to manual modal */
         }
@@ -322,20 +320,20 @@ async function indexRpaEntry(entry) {
             showToast('Skipped archive: ' + archiveName, true);
             return;
           }
-          parsed = parseRpaArchive(buf, archiveName, { manual });
+          parsed = await parseRpaArchiveFromFile(file, archiveName, { manual });
         } else {
           recordRpaFailure(entry, err.headerLine, err.message, archiveName);
           return;
         }
       }
     }
+    archiveFile = parsed.archiveFile || file;
   }
 
   const virtualEntries = buildRpaVirtualEntries(
-    dataBuf,
     displayName,
     pair?.dataEntry?.relPath || entry.relPath,
-    pair?.dataEntry?.file || entry.file,
+    archiveFile,
     parsed,
   );
   mergeFileIndex(virtualEntries);
@@ -357,9 +355,8 @@ function recordRpaFailure(entry, headerLine, message, archiveName) {
   });
 }
 
-function buildRpaVirtualEntries(arrayBuffer, archiveName, archiveRelPath, archiveFile, parsed) {
+function buildRpaVirtualEntries(archiveName, archiveRelPath, archiveFile, parsed) {
   const { version, index, zixMeta } = parsed;
-  const archiveBytes = parsed.dataBytes || new Uint8Array(arrayBuffer);
   const virtualPaths = listAllPathsFromIndex(index);
   const mediaOnlyPaths = listMediaFromIndex(index);
 
@@ -369,7 +366,7 @@ function buildRpaVirtualEntries(arrayBuffer, archiveName, archiveRelPath, archiv
     fileCount: Object.keys(index).length,
     mediaFileCount: mediaOnlyPaths.length,
     index,
-    archiveBytes,
+    archiveFile,
     zixMeta: zixMeta || null,
   };
   const existingIdx = store.loadedRpaArchives.findIndex(a => a.name === archiveName);
@@ -392,7 +389,7 @@ function buildRpaVirtualEntries(arrayBuffer, archiveName, archiveRelPath, archiv
       archiveName,
       byteSize,
       archiveLastModified,
-      getBytes: () => Promise.resolve(readRpaFile(path, parts, archiveBytes, zixMeta)),
+      getBytes: () => readRpaFile(path, parts, archiveFile, zixMeta),
     };
   });
 }
