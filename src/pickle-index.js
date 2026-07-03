@@ -263,12 +263,6 @@ export function unpickleIndex(buffer) {
         break;
 
       case OP.LONG1: {
-        if (protocol >= 4) {
-          readLine();
-          readLine();
-          stack.push(null);
-          break;
-        }
         const n = readUint8(view, pos);
         pos += 1;
         const slice = readBytes(n);

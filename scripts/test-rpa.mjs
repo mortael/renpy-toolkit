@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { unpickleIndex } from '../src/pickle-index.js';
 import {
   parseRpaArchive,
   parseManualRpaOptions,
@@ -65,6 +66,16 @@ const largeManual = parseManualRpaOptions({
 });
 assert(largeManual.offset === 0x123b09074, 'large RPA-3.0 offset');
 assert((largeManual.key >>> 0) === 0x42424242, 'large RPA-3.0 XOR key');
+
+// Protocol 5 index uses LONG1 for offsets > 2 GiB (regression: images.rpa)
+try {
+  const hex = '80059524000000000000007d948c09746573742e77656270945d948a0521ca43c2004a020a4f42430094879461732e';
+  const bytes = new Uint8Array(hex.match(/.{2}/g).map(h => parseInt(h, 16)));
+  const idx = unpickleIndex(bytes);
+  assert(idx['test.webp']?.[0]?.[0] === 3259222561, 'LONG1 large offset unpickles');
+} catch (err) {
+  fail('LONG1 protocol-5 index', err);
+}
 
 // readFileSlice past 2 GiB uses tail-relative Blob.slice (index/asset reads)
 try {
