@@ -40,12 +40,14 @@ function headerEndOffset(bytes) {
 
 function parseKeyFromHexParts(parts, startIdx) {
   let key = 0;
+  let any = false;
   for (let i = startIdx; i < parts.length; i++) {
     const v = parseInt(parts[i], 16);
-    if (!Number.isFinite(v)) return null;
+    if (!Number.isFinite(v)) continue;
     key ^= v;
+    any = true;
   }
-  return key;
+  return any ? key : 0;
 }
 
 /** Renamed-prefix archives often keep RPA-3.0 layout: PREFIX <offset> [hex keys…] */
@@ -312,9 +314,8 @@ function collectLoadAttempts(headerLine, primaryHeader, options = {}) {
 
   const prefix = parts[0];
   const isZix = isZixHeaderPrefix(prefix);
-  const offsetTokens = isZix
-    ? [parts[parts.length - 1]]
-    : [parts[1], parts.length > 2 ? parts[parts.length - 1] : null].filter(Boolean);
+  // Only ZiX stores the real offset in the last token — other keys are XOR material, not offsets.
+  const offsetTokens = isZix ? [parts[parts.length - 1]] : [parts[1]];
 
   const headerKeys = [];
   if (parts.length >= 3) {
@@ -365,6 +366,8 @@ function tryParseAttempts(bytes, attempts) {
 }
 
 const HEADER_READ_BYTES = 65536;
+/** Max bytes to read for the compressed index blob (not the whole archive). */
+const MAX_INDEX_COMPRESSED_BYTES = 128 * 1024 * 1024;
 
 /** Read only the first chunk of a File — safe for multi-GB archives. */
 export async function readHeaderFromFile(file) {
@@ -373,15 +376,74 @@ export async function readHeaderFromFile(file) {
   return readHeaderLine(new Uint8Array(buf));
 }
 
+/** Read a bounded slice for index decompression — never the whole multi-GB file. */
+export async function readIndexBlobFromFile(file, offset) {
+  if (!Number.isFinite(offset) || offset < 0 || offset >= file.size) {
+    throw new Error(`index offset ${offset} out of range (file size ${file.size})`);
+  }
+  const readLen = Math.min(file.size - offset, MAX_INDEX_COMPRESSED_BYTES);
+  const buf = await file.slice(offset, offset + readLen).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+function collectRenpyFixedHeaderAttempts(fileSize, headerBytes) {
+  const attempts = [];
+  if (headerBytes.length < 24) return attempts;
+  const text = new TextDecoder().decode(headerBytes.slice(0, 40));
+
+  if (text.startsWith('RPA-2.0 ') && headerBytes.length >= 24) {
+    const offset = parseInt(text.slice(8, 24), 16);
+    if (Number.isFinite(offset) && offset >= 0 && offset < fileSize) {
+      attempts.push({ version: 'RPA-2.0 (fixed header)', offset, key: null, indexFormat: 'pickle' });
+    }
+  }
+
+  if (text.startsWith('RPA-3.0 ') && headerBytes.length >= 33) {
+    const offset = parseInt(text.slice(8, 24), 16);
+    const fixedKey = parseInt(text.slice(25, 33), 16);
+    if (Number.isFinite(offset) && offset >= 0 && offset < fileSize) {
+      if (Number.isFinite(fixedKey)) {
+        attempts.push({ version: 'RPA-3.0 (fixed header)', offset, key: fixedKey, indexFormat: 'pickle' });
+      }
+      attempts.push({ version: 'RPA-3.0 (fixed header, key 0)', offset, key: 0, indexFormat: 'pickle' });
+    }
+  }
+
+  if (text.startsWith('RPA-4.0 ') && headerBytes.length >= 33) {
+    const offset = parseInt(text.slice(8, 24), 16);
+    const fixedKey = parseInt(text.slice(25, 33), 16);
+    if (Number.isFinite(offset) && offset >= 0 && offset < fileSize) {
+      if (Number.isFinite(fixedKey)) {
+        attempts.push({ version: 'RPA-4.0 (fixed header)', offset, key: fixedKey, indexFormat: 'pickle' });
+      }
+      attempts.push({ version: 'RPA-4.0 (fixed header, key 0)', offset, key: 0, indexFormat: 'pickle' });
+    }
+  }
+
+  return attempts;
+}
+
+function dedupeAttempts(attempts) {
+  const seen = new Set();
+  return attempts.filter(a => {
+    const sig = `${a.version}:${a.offset}:${a.key == null ? 'null' : a.key}:${a.indexFormat || 'pickle'}`;
+    if (seen.has(sig)) return false;
+    seen.add(sig);
+    return true;
+  });
+}
+
 async function loadParsedIndexFromFile(file, attempt) {
-  const buf = await file.slice(attempt.offset).arrayBuffer();
-  const bytes = new Uint8Array(buf);
+  const bytes = await readIndexBlobFromFile(file, attempt.offset);
   return loadParsedIndex(bytes, { ...attempt, offset: 0 });
 }
 
 async function tryParseAttemptsFromFile(file, attempts) {
   let lastErr = null;
   for (const attempt of attempts) {
+    if (!Number.isFinite(attempt.offset) || attempt.offset < 0 || attempt.offset >= file.size) {
+      continue;
+    }
     try {
       const index = await loadParsedIndexFromFile(file, attempt);
       return {
@@ -436,10 +498,23 @@ export async function parseRpaArchiveFromFile(file, filename = 'archive.rpa', op
     });
   }
 
-  const attempts = collectLoadAttempts(headerLine, primaryHeader, {
-    zixKey: options.zixKey ?? null,
-    zixRunAmount: options.zixRunAmount ?? null,
-  });
+  const headerPrefix = new Uint8Array(
+    await file.slice(0, Math.min(file.size, 64)).arrayBuffer(),
+  );
+  const attempts = dedupeAttempts([
+    ...collectRenpyFixedHeaderAttempts(file.size, headerPrefix),
+    ...collectLoadAttempts(headerLine, primaryHeader, {
+      zixKey: options.zixKey ?? null,
+      zixRunAmount: options.zixRunAmount ?? null,
+    }),
+    // Extra key variants for the primary offset.
+    ...(primaryHeader.indexFormat === 'pickle' && Number.isFinite(primaryHeader.offset)
+      ? [
+          { version: primaryHeader.version + ' (key 0)', offset: primaryHeader.offset, key: 0, indexFormat: 'pickle' },
+          { version: primaryHeader.version + ' (no XOR)', offset: primaryHeader.offset, key: null, indexFormat: 'pickle' },
+        ]
+      : []),
+  ]);
 
   try {
     const parsed = await tryParseAttemptsFromFile(file, attempts);
