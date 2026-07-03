@@ -314,7 +314,10 @@ async function indexRpaEntry(entry) {
 
       if (!parsed) {
         if (err instanceof RpaParseError && err.needsManual) {
-          const manual = await openRpaManualModal(entry, err.headerLine, err.message);
+          const sizeHint = file?.size != null
+            ? ` (file size ${file.size}, index offset ${parseInt(err.headerLine?.trim().split(/\s+/)[1] || '', 16) || '?'})`
+            : '';
+          const manual = await openRpaManualModal(entry, err.headerLine, err.message + sizeHint);
           if (!manual) {
             recordRpaFailure(entry, err.headerLine, 'Manual parse cancelled', archiveName);
             showToast('Skipped archive: ' + archiveName, true);

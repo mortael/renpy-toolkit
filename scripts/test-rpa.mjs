@@ -3,8 +3,10 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import {
   parseRpaArchive,
+  parseManualRpaOptions,
   tryParseGenericHeader,
   isKnownRpaHeader,
+  readFileSlice,
   listStoryScriptPathsFromIndex,
   listVirtualPathsFromIndex,
   listAllPathsFromIndex,
@@ -54,6 +56,44 @@ assert((generic?.key >>> 0) === 0xdeadbeef, 'generic header XOR key');
 
 // ZiX offset decode (parity with Python unrpa)
 assert(decodeZixOffset('a1b2c3d4e5f60718') === 0x4da1b3c2, 'ZiX offset unscramble');
+
+// Large-archive header (multi-GB images.rpa style)
+const largeManual = parseManualRpaOptions({
+  offsetHex: '0000000123b09074',
+  keyHex: '42424242',
+  format: 'rpa-3.0',
+});
+assert(largeManual.offset === 0x123b09074, 'large RPA-3.0 offset');
+assert((largeManual.key >>> 0) === 0x42424242, 'large RPA-3.0 XOR key');
+
+// readFileSlice past 2 GiB uses tail-relative Blob.slice (index/asset reads)
+try {
+  const fileSize = 0x123b09074 + 4096;
+  const offset = 0x123b09074;
+  const payload = new Uint8Array([0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+  const backing = new Uint8Array(fileSize);
+  backing.set(payload, offset);
+  const mockBlob = {
+    size: fileSize,
+    slice(start, end) {
+      let s = start;
+      let e = end;
+      if (s < 0) s = fileSize + s;
+      if (e < 0) e = fileSize + e;
+      if (e === undefined) e = fileSize;
+      return {
+        async arrayBuffer() {
+          return backing.slice(s, e).buffer;
+        },
+      };
+    },
+  };
+  const read = await readFileSlice(mockBlob, offset, payload.length);
+  assert(read.length === payload.length, 'readFileSlice length past 2 GiB');
+  assert(read[0] === 0x78 && read[1] === 0x9c, 'readFileSlice zlib magic past 2 GiB');
+} catch (err) {
+  fail('readFileSlice large offset', err);
+}
 
 // RPA-3.2 key folding: keys from field 4+ only (3 fields = offset + pad + no keys from part 3)
 // Header layout tested via tryParseGenericHeader for custom prefixes only

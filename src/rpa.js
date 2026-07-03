@@ -368,6 +368,34 @@ function tryParseAttempts(bytes, attempts) {
 const HEADER_READ_BYTES = 65536;
 /** Max bytes to read for the compressed index blob (not the whole archive). */
 const MAX_INDEX_COMPRESSED_BYTES = 128 * 1024 * 1024;
+/** Some engines mishandle Blob.slice() when start/end exceed 2 GiB. */
+const LARGE_SLICE_THRESHOLD = 2 ** 31;
+
+/**
+ * Read bytes [start, start + length) from a File/Blob without loading the whole archive.
+ * Uses tail-relative slice when start is past 2 GiB (RPA index + late asset offsets).
+ */
+export async function readFileSlice(blob, start, length) {
+  if (!blob?.slice || !Number.isFinite(start) || !Number.isFinite(length)) {
+    throw new Error('readFileSlice needs a Blob and numeric start/length');
+  }
+  if (start < 0 || length < 0 || start + length > blob.size) {
+    throw new Error(`read out of bounds: ${start}+${length} > ${blob.size}`);
+  }
+  if (length === 0) return new Uint8Array(0);
+
+  let buf;
+  if (start >= LARGE_SLICE_THRESHOLD) {
+    const tailFromStart = blob.size - start;
+    buf = await blob.slice(-tailFromStart).arrayBuffer();
+    if (length < tailFromStart) {
+      return new Uint8Array(buf).slice(0, length);
+    }
+  } else {
+    buf = await blob.slice(start, start + length).arrayBuffer();
+  }
+  return new Uint8Array(buf);
+}
 
 /** Read only the first chunk of a File — safe for multi-GB archives. */
 export async function readHeaderFromFile(file) {
@@ -376,14 +404,18 @@ export async function readHeaderFromFile(file) {
   return readHeaderLine(new Uint8Array(buf));
 }
 
-/** Read a bounded slice for index decompression — never the whole multi-GB file. */
+/** Read the compressed index tail — RPA stores zlib+pickle at EOF from header offset. */
 export async function readIndexBlobFromFile(file, offset) {
   if (!Number.isFinite(offset) || offset < 0 || offset >= file.size) {
     throw new Error(`index offset ${offset} out of range (file size ${file.size})`);
   }
-  const readLen = Math.min(file.size - offset, MAX_INDEX_COMPRESSED_BYTES);
-  const buf = await file.slice(offset, offset + readLen).arrayBuffer();
-  return new Uint8Array(buf);
+  const tailLen = file.size - offset;
+  if (tailLen > MAX_INDEX_COMPRESSED_BYTES) {
+    throw new Error(
+      `compressed index is ${tailLen} bytes (max ${MAX_INDEX_COMPRESSED_BYTES}); try increasing MAX_INDEX_COMPRESSED_BYTES`,
+    );
+  }
+  return readFileSlice(file, offset, tailLen);
 }
 
 function collectRenpyFixedHeaderAttempts(fileSize, headerBytes) {
@@ -440,8 +472,10 @@ async function loadParsedIndexFromFile(file, attempt) {
 
 async function tryParseAttemptsFromFile(file, attempts) {
   let lastErr = null;
+  let skippedOutOfRange = 0;
   for (const attempt of attempts) {
     if (!Number.isFinite(attempt.offset) || attempt.offset < 0 || attempt.offset >= file.size) {
+      skippedOutOfRange++;
       continue;
     }
     try {
@@ -454,6 +488,11 @@ async function tryParseAttemptsFromFile(file, attempts) {
     } catch (err) {
       lastErr = err;
     }
+  }
+  if (!lastErr && skippedOutOfRange > 0) {
+    throw new Error(
+      `all ${skippedOutOfRange} attempt(s) skipped: index offset >= file size (${file.size})`,
+    );
   }
   throw lastErr || new Error('No parse attempts available');
 }
@@ -694,13 +733,11 @@ export async function readRpaFile(path, parts, source, zixMeta = null) {
   if (source instanceof Uint8Array) {
     body = source.slice(offset, offset + dataLen);
   } else if (source instanceof File || (source && typeof source.slice === 'function' && typeof source.size === 'number')) {
-    const buf = await source.slice(offset, offset + dataLen).arrayBuffer();
-    body = new Uint8Array(buf);
+    body = await readFileSlice(source, offset, dataLen);
   } else if (source?.archiveBytes instanceof Uint8Array) {
     body = source.archiveBytes.slice(offset, offset + dataLen);
   } else if (source?.archiveFile) {
-    const buf = await source.archiveFile.slice(offset, offset + dataLen).arrayBuffer();
-    body = new Uint8Array(buf);
+    body = await readFileSlice(source.archiveFile, offset, dataLen);
   } else {
     throw new Error('No archive data source for ' + path);
   }
