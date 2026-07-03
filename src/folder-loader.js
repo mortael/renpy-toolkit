@@ -1,0 +1,398 @@
+import { store } from './state.js';
+import { showToast, setLoading } from './utils.js';
+import { buildFileIndex, clearAssetUrlCache, getAssetKind } from './assets.js';
+import {
+  parseRpaArchive,
+  parseRpaArchiveAsync,
+  readRpaFile,
+  listMediaFromIndex,
+  listAllPathsFromIndex,
+  RpaParseError,
+  findRpa10Pair,
+  parseRpa10Pair,
+  isKnownRpaHeader,
+  readHeaderLine,
+} from './rpa.js';
+import { openRpaManualModal } from './modal.js';
+import { parseGameDataFromFolder } from './script-parser.js';
+import { loadSaveFromEntry } from './save-editor.js';
+import { isPersistentSave, refreshSaveEntries } from './saves.js';
+import { initPyodide, pyDecompileRpyc } from './pyodide-runtime.js';
+import { recordRecentSession } from './recent-sessions.js';
+import { renderAll } from './main.js';
+import { openModal, closeModal } from './modal.js';
+import { escapeHtml } from './utils.js';
+
+function inferFolderLabel(fileList) {
+  const paths = [...fileList].map(f => (f.webkitRelativePath || f.name || '').replace(/\\/g, '/')).filter(Boolean);
+  if (!paths.length) return 'Game folder';
+  const first = paths[0];
+  const top = first.includes('/') ? first.split('/')[0] : first;
+  return top || 'Game folder';
+}
+
+function countRpycOnlyScripts(fileIndex) {
+  const rpyPaths = new Set(
+    fileIndex
+      .filter(e => /\.rpy$/i.test(e.relPath))
+      .map(e => e.relPath.replace(/\\/g, '/').toLowerCase()),
+  );
+  return fileIndex.filter(e => {
+    const norm = e.relPath.replace(/\\/g, '/').toLowerCase();
+    if (!/\.rpyc$/i.test(norm) || norm.includes('/renpy/')) return false;
+    const rpy = norm.slice(0, -1);
+    return !rpyPaths.has(rpy);
+  }).length;
+}
+
+async function tryParseStoryFromIndex() {
+  const hasRpy = store.fileIndex.some(
+    e => /\.rpy$/i.test(e.relPath) && !e.relPath.replace(/\\/g, '/').includes('/renpy/'),
+  );
+  const rpycOnly = countRpycOnlyScripts(store.fileIndex);
+  if (!hasRpy && !rpycOnly) return;
+
+  try {
+    if (rpycOnly) {
+      showToast('Decompiling .rpyc via Pyodide (first time may take a few seconds)…');
+      await initPyodide();
+    }
+    store.storyData = await parseGameDataFromFolder(store.fileIndex, {
+      decompileRpyc: pyDecompileRpyc,
+    });
+    console.info('Story data auto-detected:', store.storyData._debug);
+    const d = store.storyData._debug;
+    let msg = `Story parsed: ${d.labels} labels, ${d.vars} variables`;
+    if (d.rpyFromArchive) msg += ` (${d.rpyFromArchive} .rpy from archive)`;
+    if (d.rpycDecompiled) msg += ` (${d.rpycDecompiled} from .rpyc)`;
+    showToast(msg);
+  } catch (err) {
+    console.error('Story auto-detect failed:', err);
+    showToast('Found script files but could not parse story: ' + err.message, true);
+  }
+}
+
+function mergeFileIndex(newEntries) {
+  if (!store.fileIndex) store.fileIndex = [];
+  const byPath = new Map(store.fileIndex.map(e => [e.relPath, e]));
+  newEntries.forEach(e => byPath.set(e.relPath, e));
+  store.fileIndex = Array.from(byPath.values());
+}
+
+function updateMeta() {
+  const el = document.getElementById('file-meta');
+  if (!store.fileIndex?.length) {
+    el.textContent = 'No game loaded';
+    return;
+  }
+  const mediaCount = store.fileIndex.filter(e => {
+    const fname = e.relPath.split(/[\\/]/).pop().toLowerCase();
+    return /\.(png|jpg|jpeg|webp|gif|ogg|opus|mp3|wav|m4a|webm|mp4|avif)$/.test(fname);
+  }).length;
+  const rpaNote = store.loadedRpaArchives.length
+    ? ' · ' + store.loadedRpaArchives.length + ' archive(s)'
+    : '';
+  el.textContent = store.fileIndex.length + ' files' + (mediaCount ? ' · ' + mediaCount + ' media' : '') + rpaNote;
+}
+
+export function updateMediaStatus() {
+  const el = document.getElementById('media-status');
+  if (!el) return;
+  el.textContent = store.fileIndex ? ('🖼 ' + store.fileIndex.length + ' files indexed') : '';
+}
+
+export async function loadFolder(fileList) {
+  clearAssetUrlCache();
+  const newEntries = buildFileIndex(fileList);
+  mergeFileIndex(newEntries);
+
+  const rpaFiles = store.fileIndex.filter(e =>
+    e.source === 'disk' && /\.(rpa|rpi)$/i.test(e.relPath)
+  );
+
+  store.loadedRpaArchives = [];
+  store.rpaLoadFailures = [];
+
+  if (rpaFiles.length) {
+    setLoading(true);
+    try {
+      for (let i = 0; i < rpaFiles.length; i++) {
+        const entry = rpaFiles[i];
+        const archiveName = entry.relPath.split(/[\\/]/).pop();
+        setLoading(true, `Parsing archive ${i + 1}/${rpaFiles.length}: ${archiveName}`);
+        try {
+          await indexRpaEntry(entry);
+        } catch (err) {
+          const archiveName = entry.relPath.split(/[\\/]/).pop();
+          const headerLine = entry.file
+            ? readHeaderLine(new Uint8Array(await entry.file.arrayBuffer()))
+            : '';
+          recordRpaFailure(entry, headerLine, err.message, archiveName);
+          console.error('RPA index failed:', entry.relPath, err);
+        }
+      }
+      if (store.rpaLoadFailures.length) {
+        const names = store.rpaLoadFailures.map(f => f.name).join(', ');
+        showToast(
+          `Could not parse ${store.rpaLoadFailures.length} archive(s): ${names}. ` +
+          'Run: python rpatool.py -l <archive.rpa> for offset/key hints.',
+          true,
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const folderLabel = inferFolderLabel(fileList);
+  recordRecentSession({
+    kind: 'folder',
+    label: folderLabel,
+    fileCount: store.fileIndex.length,
+    archiveCount: store.loadedRpaArchives.length,
+    rpyCount: store.fileIndex.filter(e => /\.rpy$/i.test(e.relPath) && !e.relPath.replace(/\\/g, '/').includes('/renpy/')).length,
+    rpycCount: store.fileIndex.filter(e => /\.rpyc$/i.test(e.relPath) && !e.relPath.replace(/\\/g, '/').includes('/renpy/')).length,
+  });
+
+  showToast('Game folder loaded: ' + store.fileIndex.length + ' files indexed in total');
+  updateMeta();
+  updateMediaStatus();
+
+  await tryParseStoryFromIndex();
+
+  refreshSaveEntries();
+  if (store.saveEntries.length) {
+    try {
+      await initPyodide();
+      const slotSaves = store.saveEntries.filter(e => !isPersistentSave(e));
+      const initial = slotSaves[0] || store.saveEntries[0];
+      await loadSaveFromEntry(initial, { auto: true });
+    } catch (err) {
+      console.error('Pyodide init failed:', err);
+      showToast('Found save file(s) but could not start Python runtime: ' + err.message, true);
+    }
+  }
+
+  renderAll();
+}
+
+/** Load one or more .rpa / .rpi files without a full game folder (asset browsing + extract). */
+export async function loadArchives(fileList) {
+  const files = [...fileList].filter(f => /\.(rpa|rpi)$/i.test(f.name));
+  if (!files.length) {
+    showToast('No .rpa or .rpi files selected', true);
+    return;
+  }
+
+  const newEntries = files.map(f => ({ relPath: f.name, file: f, source: 'disk' }));
+  mergeFileIndex(newEntries);
+  const failuresBefore = store.rpaLoadFailures.length;
+
+  setLoading(true);
+  try {
+    for (let i = 0; i < newEntries.length; i++) {
+      const entry = newEntries[i];
+      const archiveName = entry.relPath.split(/[\\/]/).pop();
+      setLoading(true, `Parsing archive ${i + 1}/${newEntries.length}: ${archiveName}`);
+      try {
+        await indexRpaEntry(entry);
+      } catch (err) {
+        const headerLine = entry.file
+          ? readHeaderLine(new Uint8Array(await entry.file.arrayBuffer()))
+          : '';
+        recordRpaFailure(entry, headerLine, err.message, archiveName);
+        console.error('RPA index failed:', entry.relPath, err);
+      }
+    }
+    const newFailures = store.rpaLoadFailures.slice(failuresBefore);
+    if (newFailures.length) {
+      const names = newFailures.map(f => f.name).join(', ');
+      showToast(
+        `Could not parse ${newFailures.length} archive(s): ${names}. ` +
+        'Run: python rpatool.py -l <archive.rpa> for hints.',
+        true,
+      );
+    }
+  } finally {
+    setLoading(false);
+  }
+
+  const indexed = store.fileIndex?.some(e => e.source === 'rpa');
+  const archiveLabel = files.map(f => f.name).join(', ');
+  recordRecentSession({
+    kind: 'archive',
+    label: archiveLabel.length > 80 ? files[0].name + (files.length > 1 ? ` +${files.length - 1}` : '') : archiveLabel,
+    fileCount: store.fileIndex.length,
+    archiveCount: store.loadedRpaArchives.length,
+  });
+  showToast(
+    indexed
+      ? `Loaded ${files.length} archive file(s) — ${store.fileIndex.length} entries indexed`
+      : 'No archives could be parsed',
+    !indexed,
+  );
+  updateMeta();
+  updateMediaStatus();
+  await tryParseStoryFromIndex();
+  store.mode = 'assets';
+  if (!store.selectedId && store.fileIndex?.length) {
+    const first = store.fileIndex[0];
+    if (first) {
+      const folder = first.relPath.replace(/\\/g, '/').split('/').slice(0, -1).join('/') || '(root)';
+      store.selectedId = folder;
+    }
+  }
+  renderAll();
+}
+
+export function showSaveSelectionModal(entries) {
+  const wrap = document.createElement('div');
+  wrap.style.minWidth = '320px';
+  const h = document.createElement('h3');
+  h.style.marginTop = '0';
+  h.style.color = 'var(--accent)';
+  h.textContent = entries.length + ' save files found — choose one to load';
+  wrap.appendChild(h);
+  const sub = document.createElement('div');
+  sub.className = 'cat-sub';
+  sub.textContent = 'Sorted by last modified (newest first). Story Browser variable values update after loading.';
+  wrap.appendChild(sub);
+  entries.forEach(entry => {
+    const card = document.createElement('div');
+    card.className = 'ref-card';
+    const fname = entry.relPath.split(/[\\/]/).pop();
+    const modified = entry.file.lastModified
+      ? new Date(entry.file.lastModified).toLocaleString()
+      : '';
+    card.innerHTML =
+      '<div class="title">' + escapeHtml(fname) + '</div>' +
+      '<div class="loc">' + escapeHtml(entry.relPath) + (modified ? ' · ' + escapeHtml(modified) : '') + '</div>';
+    card.onclick = () => { closeModal(); loadSaveFromEntry(entry, { auto: true }); };
+    wrap.appendChild(card);
+  });
+  openModal(wrap);
+}
+
+async function indexRpaEntry(entry) {
+  const rel = entry.relPath.replace(/\\/g, '/');
+  const archiveName = entry.relPath.split(/[\\/]/).pop();
+
+  // RPA-1.0 index sidecar — handled together with the .rpa data file.
+  if (/\.rpi$/i.test(rel)) {
+    const rpaPath = rel.replace(/\.rpi$/i, '.rpa');
+    if (store.fileIndex.some(e => e.relPath.replace(/\\/g, '/') === rpaPath)) {
+      store.fileIndex = store.fileIndex.filter(e => e.relPath !== entry.relPath);
+      return;
+    }
+  }
+
+  const buf = await entry.file.arrayBuffer();
+  const headerLine = readHeaderLine(new Uint8Array(buf));
+  const pair = findRpa10Pair(entry, store.fileIndex);
+
+  let parsed;
+  let dataBuf = buf;
+  let displayName = archiveName;
+
+  if (pair && !isKnownRpaHeader(headerLine)) {
+    const indexBuf = await pair.indexEntry.file.arrayBuffer();
+    dataBuf = pair.dataEntry === entry ? buf : await pair.dataEntry.file.arrayBuffer();
+    parsed = parseRpa10Pair(indexBuf, dataBuf);
+    displayName = pair.baseName + '.rpa';
+  } else {
+    try {
+      parsed = await parseRpaArchiveAsync(buf, archiveName, { fileIndex: store.fileIndex });
+    } catch (err) {
+      if (pair && err instanceof RpaParseError) {
+        try {
+          const indexBuf = await pair.indexEntry.file.arrayBuffer();
+          dataBuf = pair.dataEntry === entry ? buf : await pair.dataEntry.file.arrayBuffer();
+          parsed = parseRpa10Pair(indexBuf, dataBuf);
+          displayName = pair.baseName + '.rpa';
+        } catch {
+          /* fall through to manual modal */
+        }
+      }
+
+      if (!parsed) {
+        if (err instanceof RpaParseError && err.needsManual) {
+          const manual = await openRpaManualModal(entry, err.headerLine, err.message);
+          if (!manual) {
+            recordRpaFailure(entry, err.headerLine, 'Manual parse cancelled', archiveName);
+            showToast('Skipped archive: ' + archiveName, true);
+            return;
+          }
+          parsed = parseRpaArchive(buf, archiveName, { manual });
+        } else {
+          recordRpaFailure(entry, err.headerLine, err.message, archiveName);
+          return;
+        }
+      }
+    }
+  }
+
+  const virtualEntries = buildRpaVirtualEntries(
+    dataBuf,
+    displayName,
+    pair?.dataEntry?.relPath || entry.relPath,
+    pair?.dataEntry?.file || entry.file,
+    parsed,
+  );
+  mergeFileIndex(virtualEntries);
+
+  const consumed = new Set([entry.relPath]);
+  if (pair) {
+    consumed.add(pair.dataEntry.relPath);
+    consumed.add(pair.indexEntry.relPath);
+  }
+  store.fileIndex = store.fileIndex.filter(e => !consumed.has(e.relPath));
+}
+
+function recordRpaFailure(entry, headerLine, message, archiveName) {
+  store.rpaLoadFailures.push({
+    name: archiveName,
+    relPath: entry.relPath,
+    headerLine: headerLine || '',
+    message: message || 'Unknown error',
+  });
+}
+
+function buildRpaVirtualEntries(arrayBuffer, archiveName, archiveRelPath, archiveFile, parsed) {
+  const { version, index, zixMeta } = parsed;
+  const archiveBytes = parsed.dataBytes || new Uint8Array(arrayBuffer);
+  const virtualPaths = listAllPathsFromIndex(index);
+  const mediaOnlyPaths = listMediaFromIndex(index);
+
+  const archiveMeta = {
+    name: archiveName,
+    version,
+    fileCount: Object.keys(index).length,
+    mediaFileCount: mediaOnlyPaths.length,
+    index,
+    archiveBytes,
+    zixMeta: zixMeta || null,
+  };
+  const existingIdx = store.loadedRpaArchives.findIndex(a => a.name === archiveName);
+  if (existingIdx >= 0) store.loadedRpaArchives[existingIdx] = archiveMeta;
+  else store.loadedRpaArchives.push(archiveMeta);
+
+  const prefix = archiveRelPath
+    ? archiveRelPath.replace(/\\/g, '/').replace(/\/[^/]+$/, '/')
+    : '';
+
+  const archiveLastModified = archiveFile?.lastModified || 0;
+
+  return virtualPaths.map(path => {
+    const relPath = (prefix + path).replace(/\\/g, '/');
+    const parts = index[path];
+    const byteSize = (parts || []).reduce((sum, p) => sum + (Array.isArray(p) ? (p[1] || 0) : 0), 0);
+    return {
+      relPath,
+      source: 'rpa',
+      archiveName,
+      byteSize,
+      archiveLastModified,
+      getBytes: () => Promise.resolve(readRpaFile(path, parts, archiveBytes, zixMeta)),
+    };
+  });
+}

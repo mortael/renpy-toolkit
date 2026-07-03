@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ren'Py Toolkit</title>
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Ren'Py Toolkit</h1>
+    <span class="meta" id="file-meta">No game loaded</span>
+    <details class="recent-dropdown" id="recent-dropdown">
+      <summary title="Recently loaded game folders and archives (browser cannot reopen paths — pick the folder again)">🕘 Recent</summary>
+      <div class="recent-menu" id="recent-menu"></div>
+    </details>
+    <span class="dirty-pill" id="dirty-pill">UNSAVED CHANGES</span>
+    <div class="spacer"></div>
+    <button class="mode-btn active" id="mode-assets" data-mode="assets">🖼 Asset Browser</button>
+    <button class="mode-btn" id="mode-story" data-mode="story">📖 Story Browser</button>
+    <button class="mode-btn" id="mode-save" data-mode="save">💾 Save Editor</button>
+    <button class="mode-btn" id="mode-compare" data-mode="compare">🔀 Compare Saves</button>
+    <input type="text" id="search" placeholder="Search…">
+    <button id="load-folder-btn" title="Everything stays local in your browser — nothing is uploaded anywhere. Auto-detects .rpy scripts, .rpa archives, and save files in the folder. You can click this multiple times to combine selections.">📂 Load Game Folder</button>
+    <input type="file" id="folder-input" webkitdirectory multiple>
+    <button class="secondary" id="load-archive-btn" title="Open .rpa / .rpi archives only — browse and extract assets without loading the full game folder">📦 Load Archive</button>
+    <input type="file" id="archive-input" accept=".rpa,.rpi" multiple>
+    <button class="secondary" id="load-save-btn" title="For a separate/extra save not already inside the loaded game folder">💾 Load Save</button>
+    <input type="file" id="save-input" accept=".save">
+    <button id="export-btn" disabled>Export .save</button>
+  </header>
+  <div id="subnav"></div>
+  <div id="main">
+    <div id="sidebar"></div>
+    <div id="content"></div>
+  </div>
+</div>
+<div id="toast"></div>
+<div class="loading-overlay" id="loading-overlay">Loading…</div>
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal-content" id="modal-content">
+    <button class="modal-close" id="modal-close">✕</button>
+    <div id="modal-inner"></div>
+  </div>
+</div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

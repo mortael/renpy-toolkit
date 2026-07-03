@@ -1,0 +1,28 @@
+{
+  "name": "renpy-toolkit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync-pyodide": "node scripts/sync-pyodide.mjs",
+    "postinstall": "node scripts/sync-pyodide.mjs",
+    "predev": "node scripts/sync-pyodide.mjs",
+    "prebuild": "node scripts/sync-pyodide.mjs",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:rpa": "node scripts/test-rpa.mjs",
+    "test:image-tags": "node scripts/test-image-tags.mjs",
+    "test:script-parser": "node scripts/test-script-parser.mjs",
+    "test:condition-eval": "node scripts/test-condition-eval.mjs",
+    "test": "npm run test:rpa && npm run test:image-tags && npm run test:script-parser && npm run test:condition-eval"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "pako": "^2.1.0",
+    "pyodide": "^0.26.4"
+  },
+  "devDependencies": {
+    "vite": "^8.1.0"
+  }
+}

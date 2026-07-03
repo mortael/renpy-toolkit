@@ -1,0 +1,10 @@
+node_modules/
+dist/
+public/pyodide/
+public/__pycache__/
+__pycache__/
+*.pyc
+*.log
+*.zip
+testgame/
+mcps/
