@@ -1,5 +1,5 @@
 import { store } from './state.js';
-import { escapeHtml, showToast, setDirty, setLoading } from './utils.js';
+import { escapeHtml, showToast, setDirty, setLoading, updateUnloadButton } from './utils.js';
 import { pyLoadSave, pyExpandNode, pyExportSave, pyFlattenStoreScalars, initPyodide, isPyodideReady } from './pyodide-runtime.js';
 import { renderAll } from './main.js';
 import { openSaveKeyReferencesModal } from './modal.js';
@@ -11,6 +11,14 @@ let edits = {};
 let deleted = new Set();
 let pillFilter = 'all';
 let selectedNs = null;
+
+export function resetSaveEditorState() {
+  DATA = null;
+  edits = {};
+  deleted = new Set();
+  selectedNs = null;
+  pillFilter = 'all';
+}
 
 export function extractVarsFromSaveStore(storeNodes) {
   const vars = {};
@@ -78,6 +86,7 @@ export async function loadSaveFile(file, { switchMode = true, auto = false, relP
     setDirty(false);
     document.getElementById('file-meta').textContent = file.name;
     document.getElementById('export-btn').disabled = false;
+    updateUnloadButton();
     showToast((auto ? 'Save auto-loaded: ' : 'Save loaded: ') + file.name);
     if (switchMode) store.mode = 'save';
     renderAll();

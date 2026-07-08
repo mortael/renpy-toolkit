@@ -1,4 +1,4 @@
-import { store } from './state.js';
+import { store, isSessionLoaded } from './state.js';
 
 export function showToast(msg, isError) {
   const t = document.getElementById('toast');
@@ -25,4 +25,9 @@ export function setLoading(v, message) {
 export function setDirty(v) {
   store.dirty = v;
   document.getElementById('dirty-pill').classList.toggle('show', v);
+}
+
+export function updateUnloadButton() {
+  const btn = document.getElementById('unload-btn');
+  if (btn) btn.disabled = !isSessionLoaded();
 }

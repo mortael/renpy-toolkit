@@ -4,7 +4,7 @@ import { storyTabs, renderStorySidebar, renderStoryContent } from './story-brows
 import { renderSaveSidebar, renderSaveContent, loadSaveFile, exportSaveFile, onSaveSearch, prewarmPyodide } from './save-editor.js';
 import { getPyodideStatusLabel } from './pyodide-runtime.js';
 import { renderCompareSidebar, renderCompareContent, prewarmComparePyodide } from './compare-saves.js';
-import { loadFolder, loadArchives, updateMediaStatus } from './folder-loader.js';
+import { loadFolder, loadArchives, updateMediaStatus, unloadGame } from './folder-loader.js';
 import { downloadRpaArchiveAsZip } from './assets.js';
 import { initModal } from './modal.js';
 import { getRecentSessions, formatRecentLabel, removeRecentSession } from './recent-sessions.js';
@@ -141,6 +141,7 @@ function init() {
   document.getElementById('mode-compare').onclick = () => { store.mode = 'compare'; prewarmComparePyodide(); renderAll(); };
 
   document.getElementById('load-folder-btn').onclick = () => document.getElementById('folder-input').click();
+  document.getElementById('unload-btn').onclick = () => unloadGame();
   document.getElementById('folder-input').onchange = (e) => {
     if (e.target.files?.length) loadFolder(e.target.files);
     e.target.value = '';

@@ -1,5 +1,5 @@
-import { store } from './state.js';
-import { showToast, setLoading } from './utils.js';
+import { store, isSessionLoaded } from './state.js';
+import { showToast, setLoading, setDirty, updateUnloadButton } from './utils.js';
 import { buildFileIndex, clearAssetUrlCache, getAssetKind } from './assets.js';
 import {
   parseRpaArchiveFromFile,
@@ -15,7 +15,7 @@ import {
 } from './rpa.js';
 import { openRpaManualModal } from './modal.js';
 import { parseGameDataFromFolder } from './script-parser.js';
-import { loadSaveFromEntry } from './save-editor.js';
+import { loadSaveFromEntry, resetSaveEditorState } from './save-editor.js';
 import { isPersistentSave, refreshSaveEntries } from './saves.js';
 import { initPyodide, pyDecompileRpyc } from './pyodide-runtime.js';
 import { recordRecentSession } from './recent-sessions.js';
@@ -83,7 +83,10 @@ function mergeFileIndex(newEntries) {
 function updateMeta() {
   const el = document.getElementById('file-meta');
   if (!store.fileIndex?.length) {
-    el.textContent = 'No game loaded';
+    el.textContent = store.saveData?.filename
+      ? 'Save: ' + store.saveData.filename
+      : 'No game loaded';
+    updateUnloadButton();
     return;
   }
   const mediaCount = store.fileIndex.filter(e => {
@@ -94,6 +97,55 @@ function updateMeta() {
     ? ' · ' + store.loadedRpaArchives.length + ' archive(s)'
     : '';
   el.textContent = store.fileIndex.length + ' files' + (mediaCount ? ' · ' + mediaCount + ' media' : '') + rpaNote;
+  updateUnloadButton();
+}
+
+/** Clear all loaded folders, archives, story/save data, and release blob URLs. */
+export function unloadGame() {
+  if (!isSessionLoaded()) return;
+
+  const msg = store.dirty
+    ? 'You have unsaved save changes. Close the game and clear everything from memory anyway?'
+    : 'Close the loaded game folder and clear all indexed files, archives, and saves from memory?';
+  if (!confirm(msg)) return;
+
+  clearAssetUrlCache();
+  resetSaveEditorState();
+
+  store.fileIndex = null;
+  store.storyData = null;
+  store.saveData = null;
+  store.mode = 'assets';
+  store.activeTab = 'variables';
+  store.compareSaveA = null;
+  store.compareSaveB = null;
+  store.compareSaveAName = '';
+  store.compareSaveBName = '';
+  store.compareSaveAPath = null;
+  store.compareSaveBPath = null;
+  store.selectedId = null;
+  store.searchTerm = '';
+  store.galleryContext = null;
+  store.assetBrowserPageSize = 60;
+  store.assetSelectMode = false;
+  store.assetSelectedPaths.clear();
+  store.assetExpandedFolders.clear();
+  store.storyExpandedFolders.clear();
+  store.loadedRpaArchives = [];
+  store.rpaLoadFailures = [];
+  store.saveEntries = [];
+  store.activeSavePath = null;
+
+  setDirty(false);
+  const searchEl = document.getElementById('search');
+  if (searchEl) searchEl.value = '';
+  const exportBtn = document.getElementById('export-btn');
+  if (exportBtn) exportBtn.disabled = true;
+
+  updateMeta();
+  updateMediaStatus();
+  showToast('Game closed — memory cleared');
+  renderAll();
 }
 
 export function updateMediaStatus() {

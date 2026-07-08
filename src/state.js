@@ -30,6 +30,16 @@ export const store = {
   activeSavePath: null,   // relPath of save currently open in Save Editor
 };
 
+export function isSessionLoaded() {
+  return Boolean(
+    store.fileIndex?.length ||
+    store.loadedRpaArchives?.length ||
+    store.storyData ||
+    store.saveData ||
+    store.saveEntries?.length,
+  );
+}
+
 export function lookupAssetUsages(folderHint, baseName) {
   if (!store.storyData?.assetIndex || !baseName) return [];
   const key = baseName.toLowerCase().replace(/\.[^.]+$/, '');
