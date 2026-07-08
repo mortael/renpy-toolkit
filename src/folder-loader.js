@@ -17,7 +17,7 @@ import { openRpaManualModal } from './modal.js';
 import { parseGameDataFromFolder } from './script-parser.js';
 import { loadSaveFromEntry, resetSaveEditorState } from './save-editor.js';
 import { isPersistentSave, refreshSaveEntries } from './saves.js';
-import { initPyodide, pyDecompileRpyc } from './pyodide-runtime.js';
+import { initPyodide, pyDecompileRpyc, resetPyodideSession } from './pyodide-runtime.js';
 import { recordRecentSession } from './recent-sessions.js';
 import { renderAll } from './main.js';
 import { pickDefaultAssetFolder } from './asset-browser.js';
@@ -111,6 +111,7 @@ export function unloadGame() {
 
   clearAssetUrlCache();
   resetSaveEditorState();
+  resetPyodideSession();
 
   store.fileIndex = null;
   store.storyData = null;
