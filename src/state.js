@@ -20,6 +20,8 @@ export const store = {
   assetTileSize: 140,
   assetSortBy: 'name',    // 'name' | 'size' | 'date'
   assetSortDir: 'asc',    // 'asc' | 'desc'
+  assetKindFilter: 'all', // 'all' | 'script' | 'image' | 'audio' | 'video' | 'other'
+  assetFolderScope: 'recursive', // 'recursive' | 'direct' — direct = files in this folder only
   assetSelectMode: false,
   assetSelectedPaths: new Set(),
   assetExpandedFolders: new Set(),

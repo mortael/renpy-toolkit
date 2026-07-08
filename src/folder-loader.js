@@ -128,6 +128,8 @@ export function unloadGame() {
   store.galleryContext = null;
   store.assetBrowserPageSize = 60;
   store.assetSelectMode = false;
+  store.assetKindFilter = 'all';
+  store.assetFolderScope = 'recursive';
   store.assetSelectedPaths.clear();
   store.assetExpandedFolders.clear();
   store.storyExpandedFolders.clear();
@@ -160,15 +162,19 @@ function resetAssetBrowserUiForLoad() {
   const searchEl = document.getElementById('search');
   if (searchEl) searchEl.value = '';
   store.assetSelectedPaths.clear();
+  store.assetKindFilter = 'all';
+  store.assetFolderScope = 'recursive';
   store.selectedId = null;
 }
 
 function selectDefaultAssetFolder() {
-  const folder = pickDefaultAssetFolder();
-  if (folder == null) return;
-  store.selectedId = folder;
-  if (folder) {
-    const parts = folder.split('/');
+  const picked = pickDefaultAssetFolder();
+  if (picked == null) return;
+  store.selectedId = picked.path;
+  store.assetFolderScope = picked.scope || 'recursive';
+  if (picked.viewMode) store.assetViewMode = picked.viewMode;
+  if (picked.path) {
+    const parts = picked.path.split('/');
     let acc = '';
     parts.forEach(p => {
       acc = acc ? acc + '/' + p : p;

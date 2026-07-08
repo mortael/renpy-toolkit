@@ -1,6 +1,7 @@
 import { store, lookupAssetUsages, lookupVariableRefs } from './state.js';
 import { escapeHtml } from './utils.js';
 import { getAssetKind, kindIcon, resolveAssetUrlCached, assetFolderHint, getAssetBytes } from './assets.js';
+import { initPyodide, pyDecompileRpyc } from './pyodide-runtime.js';
 import { tryParseGenericHeader, parseManualRpaOptions } from './rpa.js';
 import { jumpToLabel } from './story-browser.js';
 import { renderAll } from './main.js';
@@ -247,7 +248,17 @@ export async function openAssetPreviewModal(entry, folderHint, galleryEntries, g
       previewBox.appendChild(video);
     } else if (kind === 'script' || kind === 'text') {
       const bytes = await getAssetBytes(entry);
-      const text = new TextDecoder('utf-8').decode(bytes);
+      let text;
+      if (/\.rpym?c$/i.test(fname)) {
+        previewBox.textContent = 'Decompiling .rpyc via Pyodide…';
+        await initPyodide();
+        const result = await pyDecompileRpyc(bytes);
+        text = result.source || '';
+        pathLabel.textContent = kindIcon(kind) + ' ' + entry.relPath + ' (decompiled from .rpyc)';
+      } else {
+        text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      }
+      previewBox.innerHTML = '';
       const pre = document.createElement('pre');
       pre.style.cssText = 'max-height:60vh;overflow:auto;text-align:left;font-size:11px;white-space:pre-wrap;word-break:break-word;margin:0;padding:10px;background:var(--panel2);border-radius:6px';
       pre.textContent = text.length > 120000 ? text.slice(0, 120000) + '\n…(truncated)' : text;

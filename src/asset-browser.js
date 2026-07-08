@@ -7,6 +7,27 @@ import { detectSequences, openAnimationPlayer } from './animation-player.js';
 /** relPath of last plain click while selecting frames (Shift+click range anchor). */
 let assetSelectionAnchor = null;
 
+export const ALL_SCRIPTS_FOLDER_ID = '__scripts__';
+
+function entryKind(entry) {
+  return getAssetKind(entry.relPath.split(/[\\/]/).pop().toLowerCase());
+}
+
+function collectAllScriptEntries() {
+  if (!store.fileIndex) return [];
+  return store.fileIndex.filter(e => entryKind(e) === 'script');
+}
+
+function collectFolderEntries(node, scope) {
+  if (scope === 'direct') return node.directFiles.slice();
+  return collectAllFiles(node);
+}
+
+function applyKindFilter(entries) {
+  if (!store.assetKindFilter || store.assetKindFilter === 'all') return entries;
+  return entries.filter(e => entryKind(e) === store.assetKindFilter);
+}
+
 function imageEntriesFrom(entries) {
   return entries.filter(e => getAssetKind(e.relPath.split(/[\\/]/).pop().toLowerCase()) === 'image');
 }
@@ -134,6 +155,7 @@ export function pickDefaultAssetFolder() {
       path: node.path,
       media: mediaCountInEntries(files),
       total: files.length,
+      directScripts: node.directFiles.filter(e => entryKind(e) === 'script').length,
       imagesHint: /(^|\/)images(\/|$)/i.test(node.path),
     });
   }
@@ -149,13 +171,56 @@ export function pickDefaultAssetFolder() {
 
   if (!candidates.length) return null;
 
+  const byDirectScripts = candidates.filter(c => c.directScripts > 0).sort((a, b) => b.directScripts - a.directScripts);
+  if (byDirectScripts.length) {
+    return { path: byDirectScripts[0].path, scope: 'direct', viewMode: 'list' };
+  }
+
   const byImages = candidates.filter(c => c.imagesHint && c.media > 0).sort((a, b) => b.media - a.media);
-  if (byImages.length) return byImages[0].path;
+  if (byImages.length) return { path: byImages[0].path, scope: 'recursive' };
 
   const byMedia = candidates.filter(c => c.media > 0).sort((a, b) => b.media - a.media);
-  if (byMedia.length) return byMedia[0].path;
+  if (byMedia.length) return { path: byMedia[0].path, scope: 'recursive' };
 
-  return candidates.sort((a, b) => b.total - a.total)[0].path;
+  const best = candidates.sort((a, b) => b.total - a.total)[0];
+  return { path: best.path, scope: 'recursive' };
+}
+
+function renderScriptsShortcut(sb) {
+  const scripts = collectAllScriptEntries();
+  if (!scripts.length) return;
+
+  const sep = document.createElement('div');
+  sep.className = 'sidebar-section-sep';
+  sb.appendChild(sep);
+
+  const row = document.createElement('div');
+  row.className = 'tree-row tree-row-leaf';
+  row.style.paddingLeft = '10px';
+  row.classList.toggle('active', store.selectedId === ALL_SCRIPTS_FOLDER_ID);
+  const arrow = document.createElement('span');
+  arrow.className = 'tree-arrow-spacer';
+  const label = document.createElement('span');
+  label.className = 'tree-label';
+  label.innerHTML = kindIcon('script') + ' All scripts';
+  const count = document.createElement('span');
+  count.className = 'ct';
+  count.textContent = scripts.length;
+  row.appendChild(arrow);
+  row.appendChild(label);
+  row.appendChild(count);
+  row.onclick = () => {
+    store.selectedId = ALL_SCRIPTS_FOLDER_ID;
+    store.assetKindFilter = 'all';
+    store.assetFolderScope = 'recursive';
+    store.assetBrowserPageSize = 60;
+    store.assetViewMode = 'list';
+    store.assetSelectedPaths.clear();
+    assetSelectionAnchor = null;
+    renderAssetBrowserSidebar();
+    renderAssetBrowserContent();
+  };
+  sb.appendChild(row);
 }
 
 function renderArchiveListPanel(sb) {
@@ -213,6 +278,7 @@ export function renderAssetBrowserSidebar() {
   }
 
   renderArchiveListPanel(sb);
+  renderScriptsShortcut(sb);
 
   const tree = buildFolderTree();
   const hasTreeFiles = Object.keys(tree.children).length > 0 || tree.directFiles.length > 0;
@@ -298,6 +364,9 @@ function renderAssetFolderRow(folderNode, displayName, container, depth, term) {
     store.assetBrowserPageSize = 60;
     store.assetSelectedPaths.clear();
     assetSelectionAnchor = null;
+    if (hasChildren && folderNode.directFiles.length > 0 && collectAllFiles(folderNode).length > folderNode.directFiles.length) {
+      store.assetFolderScope = 'direct';
+    }
     if (hasChildren) store.assetExpandedFolders.add(folderPath);
     expandAncestorsOf(folderPath);
     renderAssetBrowserSidebar();
@@ -362,6 +431,9 @@ function renderTreeLevel(node, container, depth, term) {
       store.assetBrowserPageSize = 60;
       store.assetSelectedPaths.clear();
       assetSelectionAnchor = null;
+      if (hasChildren && child.directFiles.length > 0 && totalCount > child.directFiles.length) {
+        store.assetFolderScope = 'direct';
+      }
       if (hasChildren) store.assetExpandedFolders.add(child.path);
       expandAncestorsOf(child.path);
       renderAssetBrowserSidebar();
@@ -384,18 +456,35 @@ export function renderAssetBrowserContent() {
     content.innerHTML = '<div class="empty-state">Select a folder on the left. Click a parent folder (e.g. <code>images</code>) to see every file in it and all its subfolders combined.</div>';
     return;
   }
-  const tree = buildFolderTree();
-  const node = findNodeByPath(tree, store.selectedId);
-  const entries = node ? collectAllFiles(node) : [];
+  let entries;
+  let titleLabel;
+  let scopeHint = '';
+
+  if (store.selectedId === ALL_SCRIPTS_FOLDER_ID) {
+    entries = collectAllScriptEntries();
+    titleLabel = 'All scripts';
+  } else {
+    const tree = buildFolderTree();
+    const node = findNodeByPath(tree, store.selectedId);
+    const scope = store.assetFolderScope === 'direct' ? 'direct' : 'recursive';
+    const folderEntries = node ? collectFolderEntries(node, scope) : [];
+    const totalInTree = node ? collectAllFiles(node).length : 0;
+    entries = folderEntries;
+    titleLabel = store.selectedId || '(root)';
+    if (node && scope === 'direct' && totalInTree > folderEntries.length) {
+      scopeHint = ` · ${folderEntries.length} here (${totalInTree} incl. subfolders)`;
+    }
+  }
+
   const title = document.createElement('div');
   title.className = 'cat-title';
-  title.textContent = (store.selectedId || '(root)') + ' (' + entries.length + ' files)';
+  title.textContent = titleLabel + ' (' + entries.length + ' files' + scopeHint + ')';
   content.appendChild(title);
 
-  let filtered = entries;
+  let filtered = applyKindFilter(entries);
   if (store.searchTerm) {
     const term = store.searchTerm.toLowerCase();
-    filtered = entries.filter(e => e.relPath.toLowerCase().includes(term));
+    filtered = filtered.filter(e => e.relPath.toLowerCase().includes(term));
   }
   filtered = sortEntries(filtered);
 
@@ -414,6 +503,51 @@ export function renderAssetBrowserContent() {
   listBtn.onclick = () => { store.assetViewMode = 'list'; renderAssetBrowserContent(); };
   toolbar.appendChild(gridBtn);
   toolbar.appendChild(listBtn);
+
+  if (store.selectedId !== ALL_SCRIPTS_FOLDER_ID) {
+    const scopeDirectBtn = document.createElement('button');
+    scopeDirectBtn.className = 'sub-btn' + (store.assetFolderScope === 'direct' ? ' active' : '');
+    scopeDirectBtn.textContent = 'This folder only';
+    scopeDirectBtn.title = 'Show files directly in this folder, not in subfolders (e.g. scripts in root without 4000 images/)';
+    scopeDirectBtn.onclick = () => {
+      store.assetFolderScope = 'direct';
+      store.assetBrowserPageSize = 60;
+      renderAssetBrowserContent();
+    };
+    const scopeRecursiveBtn = document.createElement('button');
+    scopeRecursiveBtn.className = 'sub-btn' + (store.assetFolderScope === 'recursive' ? ' active' : '');
+    scopeRecursiveBtn.textContent = 'Include subfolders';
+    scopeRecursiveBtn.onclick = () => {
+      store.assetFolderScope = 'recursive';
+      store.assetBrowserPageSize = 60;
+      renderAssetBrowserContent();
+    };
+    toolbar.appendChild(scopeDirectBtn);
+    toolbar.appendChild(scopeRecursiveBtn);
+  }
+
+  const kindLabel = document.createElement('span');
+  kindLabel.style.fontSize = '12px';
+  kindLabel.style.color = 'var(--text-dim)';
+  kindLabel.textContent = 'Show';
+  const kindSelect = document.createElement('select');
+  kindSelect.className = 'save-inp';
+  kindSelect.innerHTML =
+    '<option value="all">All types</option>' +
+    '<option value="script">Scripts only</option>' +
+    '<option value="image">Images only</option>' +
+    '<option value="audio">Audio only</option>' +
+    '<option value="video">Video only</option>' +
+    '<option value="other">Other</option>';
+  kindSelect.value = store.assetKindFilter || 'all';
+  kindSelect.onchange = () => {
+    store.assetKindFilter = kindSelect.value;
+    store.assetBrowserPageSize = 60;
+    if (store.assetKindFilter === 'script') store.assetViewMode = 'list';
+    renderAssetBrowserContent();
+  };
+  toolbar.appendChild(kindLabel);
+  toolbar.appendChild(kindSelect);
 
   const sortLabel = document.createElement('span');
   sortLabel.style.fontSize = '12px';
@@ -506,6 +640,15 @@ export function renderAssetBrowserContent() {
   downloadBtn.onclick = () => downloadFolderAsZip(store.selectedId.replace(/[\\/]/g, '_'), filtered);
   toolbar.appendChild(downloadBtn);
   content.appendChild(toolbar);
+
+  if (!filtered.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.style.padding = '20px 0';
+    empty.innerHTML = 'No files match the current filters.<br>Try <b>This folder only</b>, <b>Scripts only</b>, or <b>All scripts</b> in the sidebar.';
+    content.appendChild(empty);
+    return;
+  }
 
   const visible = filtered.slice(0, store.assetBrowserPageSize);
   const imageEntries = imageEntriesFrom(filtered);
